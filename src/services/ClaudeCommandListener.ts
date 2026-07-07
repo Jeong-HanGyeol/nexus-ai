@@ -18,6 +18,7 @@ import type { EventDispatcher } from "../dispatcher/EventDispatcher.js";
 import type { TelegramCommandReceivedEvent } from "../dispatcher/events.js";
 import type { ILogger } from "../logger/ILogger.js";
 import type { IProjectRepository } from "../repository/interfaces/IProjectRepository.js";
+import { ensureProjectTopic } from "../telegram/ensureProjectTopic.js";
 import type { ITelegramService } from "../telegram/ITelegramService.js";
 
 /** How long a follow-up message with no project name keeps routing to the last active project. */
@@ -231,6 +232,7 @@ export class ClaudeCommandListener {
 
         await this.reply(
           `*[${project.name}]* 승인이 필요합니다\n\n${reason}\n\n진행할까요? ("예"/"아니오"로 답해주세요)`,
+          await this.projectThreadId(project),
         );
         return;
       }
@@ -337,12 +339,16 @@ export class ClaudeCommandListener {
     if (expired) {
       await this.reply(
         `*[${pending.project.name}]* 승인 대기 시간이 지나 요청이 취소되었습니다. 다시 요청해주세요.`,
+        await this.projectThreadId(pending.project),
       );
       return;
     }
 
     if (!AFFIRMATIVE_PATTERN.test(replyText.trim())) {
-      await this.reply(`*[${pending.project.name}]* 취소했습니다.`);
+      await this.reply(
+        `*[${pending.project.name}]* 취소했습니다.`,
+        await this.projectThreadId(pending.project),
+      );
       return;
     }
 
@@ -390,15 +396,28 @@ export class ClaudeCommandListener {
       systemPrompt: TELEGRAM_RESULT_SYSTEM_PROMPT,
     });
 
-    await this.reply(`*[${project.name}]*\n\n${formatted.text}`);
+    await this.reply(
+      `*[${project.name}]*\n\n${formatted.text}`,
+      await this.projectThreadId(project),
+    );
   }
 
-  private async reply(text: string): Promise<void> {
-    await this.telegramService.sendMessage(text);
+  private async reply(text: string, threadId?: string): Promise<void> {
+    await this.telegramService.sendMessage(text, threadId);
     this.dispatcher.publish({
       type: "TELEGRAM_SEND",
       payload: { messageType: "command_ack", text, sentAt: new Date() },
     });
+  }
+
+  /** Resolves (and lazily creates) this project's Telegram forum topic. */
+  private async projectThreadId(project: Project): Promise<string | undefined> {
+    return ensureProjectTopic(
+      project,
+      this.telegramService,
+      this.projectRepository,
+      this.logger,
+    );
   }
 
   private recordGeneralChatTurn(

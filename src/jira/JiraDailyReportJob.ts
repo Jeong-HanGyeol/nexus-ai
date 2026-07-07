@@ -24,6 +24,7 @@ export class JiraDailyReportJob {
     private readonly dispatcher: EventDispatcher,
     private readonly projectName: string,
     private readonly logger: ILogger,
+    private readonly threadId?: string,
   ) {}
 
   async run(): Promise<void> {
@@ -38,7 +39,7 @@ export class JiraDailyReportJob {
       });
 
       const text = `*[${this.projectName}] 오늘의 Jira 백로그*\n\n${report}`;
-      await this.telegramService.sendMessage(text);
+      await this.telegramService.sendMessage(text, this.threadId);
       this.logger.info("Jira daily report sent", {
         issueCount: issues.length,
       });

@@ -26,6 +26,7 @@ import { ReportSaveListener } from "./services/ReportSaveListener.js";
 import { TelegramErrorListener } from "./services/TelegramErrorListener.js";
 import { TelegramHistoryListener } from "./services/TelegramHistoryListener.js";
 import { TelegramSummaryListener } from "./services/TelegramSummaryListener.js";
+import { ensureProjectTopic } from "./telegram/ensureProjectTopic.js";
 import { TelegramBotService } from "./telegram/TelegramBotService.js";
 import { TelegramPoller } from "./telegram/TelegramPoller.js";
 import { ReportWatcher } from "./watcher/ReportWatcher.js";
@@ -88,6 +89,14 @@ async function main(): Promise<void> {
     botToken: env.TELEGRAM_BOT_TOKEN,
     chatId: env.TELEGRAM_CHAT_ID,
   });
+  // Undefined if the configured chat isn't a Topics-enabled supergroup yet -
+  // callers fall back to sending without a thread (see ensureProjectTopic.ts).
+  const agentThreadId = await ensureProjectTopic(
+    project,
+    telegramService,
+    repositories.projects,
+    logger,
+  );
 
   const jiraConfigured = Boolean(
     env.JIRA_BASE_URL &&
@@ -123,6 +132,7 @@ async function main(): Promise<void> {
     dispatcher,
     telegramService,
     project.name,
+    agentThreadId,
   );
   new EventLogListener(dispatcher, repositories.eventLogs, logger, project.id);
   new GptSummaryListener(dispatcher, reportSummaryProvider, logger);
@@ -138,8 +148,15 @@ async function main(): Promise<void> {
     telegramService,
     logger,
     project.name,
+    agentThreadId,
   );
-  new TelegramErrorListener(dispatcher, telegramService, logger, project.name);
+  new TelegramErrorListener(
+    dispatcher,
+    telegramService,
+    logger,
+    project.name,
+    agentThreadId,
+  );
   new TelegramHistoryListener(
     dispatcher,
     repositories.telegramHistory,
@@ -183,6 +200,7 @@ async function main(): Promise<void> {
       dispatcher,
       project.name,
       logger,
+      agentThreadId,
     );
     schedule(
       "0 9 * * 1-5",

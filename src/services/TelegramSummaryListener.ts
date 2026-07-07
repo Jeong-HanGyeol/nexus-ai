@@ -15,6 +15,7 @@ export class TelegramSummaryListener {
     private readonly telegramService: ITelegramService,
     private readonly logger: ILogger,
     private readonly projectName: string = "Unknown Project",
+    private readonly threadId?: string,
   ) {
     dispatcher.on("DATABASE_SAVE", (event) => this.handle(event));
   }
@@ -22,7 +23,7 @@ export class TelegramSummaryListener {
   private async handle(event: DatabaseSaveEvent): Promise<void> {
     const text = `*[${this.projectName}] 작업 완료: ${event.payload.fileName}*\n\n${event.payload.summary}`;
 
-    await this.telegramService.sendMessage(text);
+    await this.telegramService.sendMessage(text, this.threadId);
     this.logger.info("Telegram summary sent", {
       fileName: event.payload.fileName,
       reportId: event.payload.reportId,

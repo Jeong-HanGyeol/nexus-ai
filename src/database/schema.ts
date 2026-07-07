@@ -16,6 +16,9 @@ export const projects = sqliteTable("projects", {
   status: text("status").notNull().default("active"), // active | archived
   // last headless Claude session for this project - present -> --resume, absent -> fresh session
   claudeSessionId: text("claude_session_id"),
+  // Telegram forum topic (message_thread_id) this project's messages go to -
+  // absent until the first message is sent (see ensureProjectTopic.ts).
+  telegramThreadId: text("telegram_thread_id"),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
   updatedAt: integer("updated_at", { mode: "timestamp" }).notNull(),
 });

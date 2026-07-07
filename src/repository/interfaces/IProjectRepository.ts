@@ -8,4 +8,5 @@ export interface IProjectRepository {
   findAll(): Promise<Project[]>;
   updateStatus(id: string, status: string): Promise<void>;
   updateClaudeSessionId(id: string, sessionId: string): Promise<void>;
+  updateTelegramThreadId(id: string, threadId: string): Promise<void>;
 }

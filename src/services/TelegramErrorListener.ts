@@ -13,6 +13,7 @@ export class TelegramErrorListener {
     private readonly telegramService: ITelegramService,
     private readonly logger: ILogger,
     private readonly projectName: string = "Unknown Project",
+    private readonly threadId?: string,
   ) {
     dispatcher.on("SENTINEL_ERROR", (event) => this.handle(event));
   }
@@ -20,7 +21,7 @@ export class TelegramErrorListener {
   private async handle(event: SentinelErrorEvent): Promise<void> {
     const text = `*[${this.projectName}] 오류 발생*\n원인 이벤트: ${event.payload.sourceEventType}\n메시지: ${event.payload.message}`;
 
-    await this.telegramService.sendMessage(text);
+    await this.telegramService.sendMessage(text, this.threadId);
     this.logger.info("Telegram error alert sent", {
       sourceEventType: event.payload.sourceEventType,
     });

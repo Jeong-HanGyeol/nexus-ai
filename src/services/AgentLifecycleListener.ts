@@ -17,6 +17,7 @@ export class AgentLifecycleListener {
     private readonly dispatcher: EventDispatcher,
     private readonly telegramService: ITelegramService,
     private readonly projectName: string,
+    private readonly threadId?: string,
   ) {
     dispatcher.on("AGENT_STARTED", (event) => this.handleStarted(event));
   }
@@ -35,7 +36,7 @@ export class AgentLifecycleListener {
     text: string,
     messageType: "agent_started" | "agent_stopped",
   ): Promise<void> {
-    await this.telegramService.sendMessage(text);
+    await this.telegramService.sendMessage(text, this.threadId);
     this.dispatcher.publish({
       type: "TELEGRAM_SEND",
       payload: { messageType, text, sentAt: new Date() },

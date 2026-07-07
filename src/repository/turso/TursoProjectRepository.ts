@@ -64,4 +64,11 @@ export class TursoProjectRepository implements IProjectRepository {
       .set({ claudeSessionId: sessionId, updatedAt: new Date() })
       .where(eq(projects.id, id));
   }
+
+  async updateTelegramThreadId(id: string, threadId: string): Promise<void> {
+    await this.db
+      .update(projects)
+      .set({ telegramThreadId: threadId, updatedAt: new Date() })
+      .where(eq(projects.id, id));
+  }
 }
