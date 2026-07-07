@@ -1,6 +1,6 @@
 import type { Project } from "../database/schema.js";
 
-function escapeRegExp(value: string): string {
+export function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 

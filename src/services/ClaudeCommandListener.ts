@@ -1,5 +1,11 @@
+import { readdir, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { matchProjectFromText } from "../agent/matchProjectFromText.js";
-import { isSelfModificationRequested } from "../agent/selfModificationTrigger.js";
+import {
+  isSelfModificationRequested,
+  stripSelfModificationTrigger,
+} from "../agent/selfModificationTrigger.js";
 import type { IAIProvider } from "../ai/IAIProvider.js";
 import {
   buildContinuationCheckPrompt,
@@ -26,6 +32,25 @@ interface PendingApproval {
   originalText: string;
   reason: string;
   requestedAt: number;
+}
+
+/** How many past turns (user+NEXUS combined) to keep for the memoryless general-chat path. */
+const MAX_GENERAL_CHAT_HISTORY = 6;
+
+/**
+ * Marker files written by scripts/cli-approval-hook.mjs (a Claude Code
+ * PreToolUse hook - see /Users/hangyeol/.claude/plans/proud-napping-glacier.md).
+ * That hook and this long-running listener are separate OS processes that
+ * coordinate purely through this directory, since only this listener may
+ * long-poll Telegram (the hook only ever sends messages).
+ */
+const CLI_APPROVAL_DIR = path.join(os.homedir(), ".claude", "nexus-cli-approvals");
+/** Slightly longer than the hook's own 5-minute wait, so a crashed hook's leftover file doesn't hijack replies forever. */
+const CLI_APPROVAL_STALE_MS = 6 * 60 * 1000;
+
+interface GeneralChatTurn {
+  role: "user" | "assistant";
+  text: string;
 }
 
 /**
@@ -74,6 +99,8 @@ export class ClaudeCommandListener {
   private lastActiveProjectId: string | undefined;
   private lastActiveAt: number | undefined;
   private pendingApproval: PendingApproval | undefined;
+  /** OpenAiProvider is stateless per-call, so this is the only memory the general-chat (no-project) path has across messages. */
+  private readonly generalChatHistory: GeneralChatTurn[] = [];
 
   constructor(
     private readonly dispatcher: EventDispatcher,
@@ -92,6 +119,10 @@ export class ClaudeCommandListener {
 
   private async handle(event: TelegramCommandReceivedEvent): Promise<void> {
     try {
+      if (await this.tryResolveCliApproval(event.payload.text)) {
+        return;
+      }
+
       if (this.pendingApproval) {
         await this.resolvePendingApproval(this.pendingApproval, event.payload.text);
         return;
@@ -102,13 +133,20 @@ export class ClaudeCommandListener {
         this.selfProjectId &&
         isSelfModificationRequested(event.payload.text);
 
+      // The trigger word is just a routing signal, not part of the actual
+      // task - strip it so headless Claude sees only the real instruction
+      // (see stripSelfModificationTrigger's doc comment).
+      const taskText = selfTargeted
+        ? stripSelfModificationTrigger(event.payload.text)
+        : event.payload.text;
+
       const projects = selfTargeted
         ? allProjects
         : allProjects.filter((p) => p.id !== this.selfProjectId);
 
       let project = selfTargeted
         ? allProjects.find((p) => p.id === this.selfProjectId)
-        : matchProjectFromText(event.payload.text, projects);
+        : matchProjectFromText(taskText, projects);
 
       let continuedFromContext = false;
       if (
@@ -122,7 +160,7 @@ export class ClaudeCommandListener {
         );
         if (stickyCandidate) {
           const { text: classification } =
-            await this.managementAiProvider.complete(event.payload.text, {
+            await this.managementAiProvider.complete(taskText, {
               systemPrompt: buildContinuationCheckPrompt(
                 stickyCandidate.name,
               ),
@@ -143,12 +181,26 @@ export class ClaudeCommandListener {
             `Jira 일일 백로그 리포트 전송 시각: ${this.jiraScheduleDescription}`,
           );
         }
+        // OpenAiProvider is stateless per-call - without this, each general
+        // chat reply has zero awareness of what was just asked/answered.
+        const historyBlock = this.generalChatHistory.length
+          ? `\n\n[최근 대화 기록]\n${this.generalChatHistory
+              .map(
+                (turn) =>
+                  `${turn.role === "user" ? "사용자" : "NEXUS"}: ${turn.text}`,
+              )
+              .join("\n")}`
+          : "";
 
-        const { text } = await this.managementAiProvider.complete(
-          `[NEXUS 시스템 정보]\n${contextLines.join("\n")}\n\n[사용자 메시지]\n${event.payload.text}`,
+        const { text: replyText } = await this.managementAiProvider.complete(
+          `[NEXUS 시스템 정보]\n${contextLines.join("\n")}${historyBlock}\n\n[사용자 메시지]\n${taskText}`,
           { systemPrompt: GENERAL_CHAT_SYSTEM_PROMPT },
         );
-        await this.reply(text);
+
+        this.recordGeneralChatTurn("user", taskText);
+        this.recordGeneralChatTurn("assistant", replyText);
+
+        await this.reply(replyText);
         return;
       }
 
@@ -156,7 +208,7 @@ export class ClaudeCommandListener {
       this.lastActiveAt = Date.now();
 
       const { text: riskClassification } =
-        await this.managementAiProvider.complete(event.payload.text, {
+        await this.managementAiProvider.complete(taskText, {
           systemPrompt: buildRiskClassificationPrompt(project.name),
         });
 
@@ -167,7 +219,7 @@ export class ClaudeCommandListener {
 
         this.pendingApproval = {
           project,
-          originalText: event.payload.text,
+          originalText: taskText,
           reason,
           requestedAt: Date.now(),
         };
@@ -183,7 +235,7 @@ export class ClaudeCommandListener {
         return;
       }
 
-      await this.runClaudeTask(project, event.payload.text, {
+      await this.runClaudeTask(project, taskText, {
         continuedFromContext,
       });
     } catch (error) {
@@ -202,6 +254,77 @@ export class ClaudeCommandListener {
         });
       }
     }
+  }
+
+  /**
+   * Checks for a pending CLI-hook approval request (scripts/cli-approval-hook.mjs)
+   * before any other routing. If found, this incoming message IS the answer
+   * to that request, not a project command - resolve it and stop, so it
+   * never falls through to project matching/general chat.
+   */
+  private async tryResolveCliApproval(replyText: string): Promise<boolean> {
+    let entries: string[];
+    try {
+      entries = await readdir(CLI_APPROVAL_DIR);
+    } catch {
+      return false;
+    }
+
+    const pending: Array<{ file: string; createdAt: number }> = [];
+    for (const entry of entries) {
+      if (!entry.endsWith(".json")) {
+        continue;
+      }
+      const filePath = path.join(CLI_APPROVAL_DIR, entry);
+      try {
+        const data = JSON.parse(await readFile(filePath, "utf-8")) as {
+          status?: string;
+          createdAt?: string;
+        };
+        if (data.status !== "pending" || !data.createdAt) {
+          continue;
+        }
+        const createdAt = Date.parse(data.createdAt);
+        if (
+          Number.isNaN(createdAt) ||
+          Date.now() - createdAt > CLI_APPROVAL_STALE_MS
+        ) {
+          // Orphaned from a hook process that never got to clean up (e.g.
+          // killed mid-flight) - remove it so it can't hijack future replies.
+          await rm(filePath, { force: true });
+          continue;
+        }
+        pending.push({ file: filePath, createdAt });
+      } catch {
+        continue;
+      }
+    }
+
+    const oldest = pending.sort((a, b) => a.createdAt - b.createdAt)[0];
+    if (!oldest) {
+      return false;
+    }
+
+    const approved = AFFIRMATIVE_PATTERN.test(replyText.trim());
+    const record = JSON.parse(await readFile(oldest.file, "utf-8")) as Record<
+      string,
+      unknown
+    >;
+    await writeFile(
+      oldest.file,
+      JSON.stringify({
+        ...record,
+        status: approved ? "approved" : "denied",
+        resolvedAt: new Date().toISOString(),
+        resolvedBy: "텔레그램에서 응답",
+      }),
+    );
+
+    await this.reply(
+      `*[CLI 승인]* ${approved ? "허용" : "거부"}했습니다. (도구: ${String(record.tool ?? "?")})`,
+    );
+
+    return true;
   }
 
   private async resolvePendingApproval(
@@ -276,5 +399,15 @@ export class ClaudeCommandListener {
       type: "TELEGRAM_SEND",
       payload: { messageType: "command_ack", text, sentAt: new Date() },
     });
+  }
+
+  private recordGeneralChatTurn(
+    role: GeneralChatTurn["role"],
+    text: string,
+  ): void {
+    this.generalChatHistory.push({ role, text });
+    while (this.generalChatHistory.length > MAX_GENERAL_CHAT_HISTORY) {
+      this.generalChatHistory.shift();
+    }
   }
 }
