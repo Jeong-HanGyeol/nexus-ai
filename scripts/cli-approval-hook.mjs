@@ -19,6 +19,8 @@ import {
   appendFileSync,
   createReadStream,
   createWriteStream,
+  openSync,
+  closeSync,
 } from "node:fs";
 import { createInterface } from "node:readline";
 import path from "node:path";
@@ -29,6 +31,7 @@ const NEXUS_ENV_PATH = "/Users/hangyeol/Desktop/develop/nexus-ai/.env";
 const APPROVAL_DIR = path.join(os.homedir(), ".claude", "nexus-cli-approvals");
 const DEBUG_LOG_PATH = path.join(APPROVAL_DIR, "debug.log");
 const TIMEOUT_MS = 5 * 60 * 1000;
+const NO_TTY_TELEGRAM_WINDOW_MS = 15 * 1000;
 const POLL_INTERVAL_MS = 1000;
 const AFFIRMATIVE_PATTERN = /^(y|yes|예|네|응|어|ㅇㅋ|오케이|승인|진행)/i;
 
@@ -174,6 +177,25 @@ function timeoutSignal(ms) {
   return new Promise((resolve) => setTimeout(() => resolve("timeout"), ms));
 }
 
+/**
+ * Cheap synchronous probe for whether this process has a controlling
+ * terminal at all. Hosted/managed Claude Code sessions (no OS tty, ENXIO)
+ * must not attempt the local race - if they did, Claude Code's own native
+ * approval UI (the one that already surfaces things like GateGuard prompts
+ * in-conversation) would never get a chance to run, since this hook would
+ * make the allow/deny call unilaterally instead of deferring to it.
+ */
+function hasControllingTty() {
+  try {
+    const fd = openSync("/dev/tty", "r");
+    closeSync(fd);
+    return true;
+  } catch (error) {
+    debugLog(`no controlling tty: ${String(error)}`);
+    return false;
+  }
+}
+
 async function main() {
   const stdinRaw = await readStdin();
 
@@ -203,6 +225,82 @@ async function main() {
     return;
   }
 
+  const humanSummary = `도구: ${toolName}\n경로: ${cwd}\n${truncate(JSON.stringify(toolInput), 300)}`;
+
+  if (!hasControllingTty()) {
+    // No OS terminal to race against (e.g. this hosted/managed session).
+    // EXPERIMENT: give Telegram a short head start - if it answers within
+    // NO_TTY_TELEGRAM_WINDOW_MS, honor that; otherwise fall back to Claude
+    // Code's own native approval UI (defer via "ask"). This only works if
+    // this harness actually waits out that window rather than bypassing a
+    // slow-to-decide hook - that's exactly what this test measures.
+    debugLog(`no controlling tty - racing telegram vs ${NO_TTY_TELEGRAM_WINDOW_MS}ms fallback-to-ask window`);
+
+    mkdirSync(APPROVAL_DIR, { recursive: true });
+    const id = randomBytes(3).toString("hex");
+    const filePath = path.join(APPROVAL_DIR, `${id}.json`);
+    const record = {
+      id,
+      status: "pending",
+      tool: toolName,
+      cwd,
+      inputSummary: truncate(JSON.stringify(toolInput), 300),
+      createdAt: new Date().toISOString(),
+    };
+    writeFileSync(filePath, JSON.stringify(record));
+
+    await sendTelegramMessage(
+      token,
+      chatId,
+      `*[CLI 승인 요청 #${id}]*\n${humanSummary}\n\n"예"/"아니오"로 답해주세요 (${NO_TTY_TELEGRAM_WINDOW_MS / 1000}초 내 - 늦으면 CLI 세션에서 직접 승인하게 됩니다)`,
+    );
+
+    const result = await Promise.race([
+      pollApprovalFile(filePath).then((status) => ({ source: "telegram", status })),
+      timeoutSignal(NO_TTY_TELEGRAM_WINDOW_MS).then(() => ({ source: "fallback" })),
+    ]);
+
+    debugLog(`no-tty race settled: source=${result.source}`);
+
+    if (result.source === "fallback") {
+      try {
+        unlinkSync(filePath);
+      } catch {
+        // not fatal
+      }
+      outputDecision("ask");
+      return;
+    }
+
+    const finalStatus = result.status;
+    try {
+      writeFileSync(
+        filePath,
+        JSON.stringify({
+          ...record,
+          status: finalStatus,
+          resolvedAt: new Date().toISOString(),
+          resolvedBy: "텔레그램에서 응답",
+        }),
+      );
+      unlinkSync(filePath);
+    } catch {
+      // not fatal
+    }
+
+    await sendTelegramMessage(
+      token,
+      chatId,
+      `*[CLI 승인 #${id}]* ${finalStatus === "approved" ? "허용됨" : "거부됨"} (텔레그램에서 응답)`,
+    );
+
+    outputDecision(
+      finalStatus === "approved" ? "allow" : "deny",
+      `CLI 승인 ${finalStatus === "approved" ? "완료" : "거부"} (텔레그램에서 응답)`,
+    );
+    return;
+  }
+
   mkdirSync(APPROVAL_DIR, { recursive: true });
   const id = randomBytes(3).toString("hex");
   const filePath = path.join(APPROVAL_DIR, `${id}.json`);
@@ -217,8 +315,6 @@ async function main() {
     createdAt: new Date().toISOString(),
   };
   writeFileSync(filePath, JSON.stringify(record));
-
-  const humanSummary = `도구: ${toolName}\n경로: ${cwd}\n${inputSummary}`;
 
   await sendTelegramMessage(
     token,
