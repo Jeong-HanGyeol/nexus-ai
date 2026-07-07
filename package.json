@@ -1,0 +1,50 @@
+{
+  "name": "nexus",
+  "version": "0.1.0",
+  "description": "NEXUS - AI Development Manager for Claude Code - report collection, GPT summarization, and Telegram delivery across multiple agents/PCs.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "db:generate": "drizzle-kit generate",
+    "db:push": "drizzle-kit push",
+    "db:studio": "drizzle-kit studio",
+    "db:test": "tsx src/database/test-connection.ts",
+    "watch:test": "tsx src/watcher/test-watcher.ts",
+    "dispatcher:test": "tsx src/dispatcher/test-dispatcher.ts",
+    "ai:test-openai": "tsx src/ai/test-openai-provider.ts",
+    "ai:test-claude": "tsx src/ai/test-claude-provider.ts",
+    "agent:test-project-id": "tsx src/agent/test-project-identifier.ts",
+    "agent:test-workspace-scan": "tsx src/agent/test-workspace-scan.ts",
+    "jira:test-report": "tsx src/jira/test-jira-report.ts",
+    "telegram:test": "tsx src/telegram/test-telegram.ts",
+    "deploy": "npm run build && pm2 start ecosystem.config.cjs",
+    "pm2:start": "pm2 start ecosystem.config.cjs",
+    "pm2:stop": "pm2 stop sentinel",
+    "pm2:restart": "pm2 restart sentinel",
+    "pm2:delete": "pm2 delete sentinel",
+    "pm2:status": "pm2 status",
+    "pm2:logs": "pm2 logs sentinel"
+  },
+  "dependencies": {
+    "@libsql/client": "^0.14.0",
+    "chokidar": "^5.0.0",
+    "cross-spawn": "^7.0.6",
+    "dotenv": "^16.4.5",
+    "drizzle-orm": "^0.36.4",
+    "node-cron": "^4.6.0",
+    "openai": "^6.45.0"
+  },
+  "devDependencies": {
+    "@types/cross-spawn": "^6.0.6",
+    "@types/node": "^22.10.2",
+    "@types/node-cron": "^3.0.11",
+    "drizzle-kit": "^0.28.1",
+    "pm2": "^7.0.3",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
