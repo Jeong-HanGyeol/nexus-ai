@@ -47,6 +47,15 @@ export class TursoProjectRepository implements IProjectRepository {
     return rows[0];
   }
 
+  async findByTelegramThreadId(threadId: string): Promise<Project | undefined> {
+    const rows = await this.db
+      .select()
+      .from(projects)
+      .where(eq(projects.telegramThreadId, threadId))
+      .limit(1);
+    return rows[0];
+  }
+
   async findAll(): Promise<Project[]> {
     return this.db.select().from(projects);
   }

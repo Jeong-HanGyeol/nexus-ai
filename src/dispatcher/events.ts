@@ -68,6 +68,8 @@ export interface TelegramCommandReceivedEvent {
     text: string;
     messageId: number;
     receivedAt: Date;
+    /** Forum topic this message was sent in, if any (see ensureProjectTopic.ts). */
+    threadId?: string;
   };
 }
 

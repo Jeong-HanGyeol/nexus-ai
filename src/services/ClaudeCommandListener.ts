@@ -129,80 +129,99 @@ export class ClaudeCommandListener {
         return;
       }
 
-      const allProjects = await this.projectRepository.findAll();
-      const selfTargeted =
-        this.selfProjectId &&
-        isSelfModificationRequested(event.payload.text);
-
-      // The trigger word is just a routing signal, not part of the actual
-      // task - strip it so headless Claude sees only the real instruction
-      // (see stripSelfModificationTrigger's doc comment).
-      const taskText = selfTargeted
-        ? stripSelfModificationTrigger(event.payload.text)
-        : event.payload.text;
-
-      const projects = selfTargeted
-        ? allProjects
-        : allProjects.filter((p) => p.id !== this.selfProjectId);
-
-      let project = selfTargeted
-        ? allProjects.find((p) => p.id === this.selfProjectId)
-        : matchProjectFromText(taskText, projects);
-
+      // Sending a message inside a project's own Telegram topic is a more
+      // deliberate signal than any text match - it skips keyword/name
+      // matching (and the self-modification trigger word) entirely, since
+      // navigating to that specific topic already unambiguously says which
+      // project this is about.
+      let project = event.payload.threadId
+        ? await this.projectRepository.findByTelegramThreadId(
+            event.payload.threadId,
+          )
+        : undefined;
+      let taskText = event.payload.text;
       let continuedFromContext = false;
-      if (
-        !project &&
-        this.lastActiveProjectId &&
-        this.lastActiveAt &&
-        Date.now() - this.lastActiveAt < STICKY_PROJECT_WINDOW_MS
-      ) {
-        const stickyCandidate = allProjects.find(
-          (p) => p.id === this.lastActiveProjectId,
-        );
-        if (stickyCandidate) {
-          const { text: classification } =
-            await this.managementAiProvider.complete(taskText, {
-              systemPrompt: buildContinuationCheckPrompt(
-                stickyCandidate.name,
-              ),
-            });
-          if (classification.trim().toUpperCase().startsWith("CONTINUE")) {
-            project = stickyCandidate;
-            continuedFromContext = true;
+
+      if (project) {
+        this.logger.info("Routed via Telegram topic", {
+          project: project.name,
+          threadId: event.payload.threadId,
+        });
+      } else {
+        const allProjects = await this.projectRepository.findAll();
+        const selfTargeted =
+          this.selfProjectId &&
+          isSelfModificationRequested(event.payload.text);
+
+        // The trigger word is just a routing signal, not part of the actual
+        // task - strip it so headless Claude sees only the real instruction
+        // (see stripSelfModificationTrigger's doc comment).
+        taskText = selfTargeted
+          ? stripSelfModificationTrigger(event.payload.text)
+          : event.payload.text;
+
+        const projects = selfTargeted
+          ? allProjects
+          : allProjects.filter((p) => p.id !== this.selfProjectId);
+
+        project = selfTargeted
+          ? allProjects.find((p) => p.id === this.selfProjectId)
+          : matchProjectFromText(taskText, projects);
+
+        if (
+          !project &&
+          this.lastActiveProjectId &&
+          this.lastActiveAt &&
+          Date.now() - this.lastActiveAt < STICKY_PROJECT_WINDOW_MS
+        ) {
+          const stickyCandidate = allProjects.find(
+            (p) => p.id === this.lastActiveProjectId,
+          );
+          if (stickyCandidate) {
+            const { text: classification } =
+              await this.managementAiProvider.complete(taskText, {
+                systemPrompt: buildContinuationCheckPrompt(
+                  stickyCandidate.name,
+                ),
+              });
+            if (classification.trim().toUpperCase().startsWith("CONTINUE")) {
+              project = stickyCandidate;
+              continuedFromContext = true;
+            }
           }
         }
-      }
 
-      if (!project) {
-        const contextLines = [
-          `관리 중인 프로젝트 목록: ${projects.map((p) => p.name).join(", ") || "(없음)"}`,
-        ];
-        if (this.jiraScheduleDescription) {
-          contextLines.push(
-            `Jira 일일 백로그 리포트 전송 시각: ${this.jiraScheduleDescription}`,
+        if (!project) {
+          const contextLines = [
+            `관리 중인 프로젝트 목록: ${projects.map((p) => p.name).join(", ") || "(없음)"}`,
+          ];
+          if (this.jiraScheduleDescription) {
+            contextLines.push(
+              `Jira 일일 백로그 리포트 전송 시각: ${this.jiraScheduleDescription}`,
+            );
+          }
+          // OpenAiProvider is stateless per-call - without this, each general
+          // chat reply has zero awareness of what was just asked/answered.
+          const historyBlock = this.generalChatHistory.length
+            ? `\n\n[최근 대화 기록]\n${this.generalChatHistory
+                .map(
+                  (turn) =>
+                    `${turn.role === "user" ? "사용자" : "NEXUS"}: ${turn.text}`,
+                )
+                .join("\n")}`
+            : "";
+
+          const { text: replyText } = await this.managementAiProvider.complete(
+            `[NEXUS 시스템 정보]\n${contextLines.join("\n")}${historyBlock}\n\n[사용자 메시지]\n${taskText}`,
+            { systemPrompt: GENERAL_CHAT_SYSTEM_PROMPT },
           );
+
+          this.recordGeneralChatTurn("user", taskText);
+          this.recordGeneralChatTurn("assistant", replyText);
+
+          await this.reply(replyText);
+          return;
         }
-        // OpenAiProvider is stateless per-call - without this, each general
-        // chat reply has zero awareness of what was just asked/answered.
-        const historyBlock = this.generalChatHistory.length
-          ? `\n\n[최근 대화 기록]\n${this.generalChatHistory
-              .map(
-                (turn) =>
-                  `${turn.role === "user" ? "사용자" : "NEXUS"}: ${turn.text}`,
-              )
-              .join("\n")}`
-          : "";
-
-        const { text: replyText } = await this.managementAiProvider.complete(
-          `[NEXUS 시스템 정보]\n${contextLines.join("\n")}${historyBlock}\n\n[사용자 메시지]\n${taskText}`,
-          { systemPrompt: GENERAL_CHAT_SYSTEM_PROMPT },
-        );
-
-        this.recordGeneralChatTurn("user", taskText);
-        this.recordGeneralChatTurn("assistant", replyText);
-
-        await this.reply(replyText);
-        return;
       }
 
       this.lastActiveProjectId = project.id;

@@ -14,6 +14,8 @@ interface TelegramMessage {
   chat: { id: number };
   text?: string;
   date: number;
+  /** Present only when sent inside a forum topic (see ensureProjectTopic.ts). */
+  message_thread_id?: number;
 }
 
 interface TelegramUpdate {
@@ -116,6 +118,9 @@ export class TelegramPoller implements ITelegramPoller {
         text: message.text,
         messageId: message.message_id,
         receivedAt: new Date(message.date * 1000),
+        ...(message.message_thread_id !== undefined
+          ? { threadId: String(message.message_thread_id) }
+          : {}),
       },
     });
   }
