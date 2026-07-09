@@ -1,7 +1,6 @@
 import { readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { schedule } from "node-cron";
 import { BudgetLimitedAIProvider } from "./ai/providers/BudgetLimitedAIProvider.js";
 import { CachedAIProvider } from "./ai/providers/CachedAIProvider.js";
 import { ClaudeProvider } from "./ai/providers/ClaudeProvider.js";
@@ -15,8 +14,6 @@ import { loadEnv } from "./config/env.js";
 import { createDatabaseClient } from "./database/client.js";
 import { EventDispatcher } from "./dispatcher/EventDispatcher.js";
 import { ConsoleLogger } from "./logger/ConsoleLogger.js";
-import { JiraClient } from "./jira/JiraClient.js";
-import { JiraDailyReportJob } from "./jira/JiraDailyReportJob.js";
 import { RepositoryContainer } from "./repository/RepositoryContainer.js";
 import { AgentLifecycleListener } from "./services/AgentLifecycleListener.js";
 import { ClaudeCommandListener } from "./services/ClaudeCommandListener.js";
@@ -56,29 +53,35 @@ async function main(): Promise<void> {
     confidence,
   });
 
-  if (!env.OPENAI_API_KEY) {
-    throw new Error("OPENAI_API_KEY is not set in .env");
+  // OpenAI is optional - only the report-summary pipeline (Report Watcher ->
+  // GptSummaryListener) uses it. Without a key that pipeline is simply not
+  // wired below; the interactive Telegram <-> Claude command flow never
+  // touches OpenAI at all.
+  let reportSummaryProvider: CachedAIProvider | undefined;
+  if (env.OPENAI_API_KEY) {
+    const trackedOpenAiProvider = new UsageTrackingAIProvider(
+      new OpenAiProvider({ apiKey: env.OPENAI_API_KEY }),
+      repositories.statistics,
+      project.id,
+      "openai",
+    );
+    const aiProvider = env.OPENAI_MONTHLY_BUDGET_USD
+      ? new BudgetLimitedAIProvider(
+          trackedOpenAiProvider,
+          repositories.statistics,
+          project.id,
+          env.OPENAI_MONTHLY_BUDGET_USD,
+        )
+      : trackedOpenAiProvider;
+    // Report summaries are pure/input-determined - safe to cache by content hash.
+    reportSummaryProvider = new CachedAIProvider(
+      aiProvider,
+      repositories.aiResponseCache,
+      "report_summary",
+    );
+  } else {
+    logger.info("OPENAI_API_KEY not set, report-summary pipeline disabled");
   }
-  const trackedOpenAiProvider = new UsageTrackingAIProvider(
-    new OpenAiProvider({ apiKey: env.OPENAI_API_KEY }),
-    repositories.statistics,
-    project.id,
-    "openai",
-  );
-  const aiProvider = env.OPENAI_MONTHLY_BUDGET_USD
-    ? new BudgetLimitedAIProvider(
-        trackedOpenAiProvider,
-        repositories.statistics,
-        project.id,
-        env.OPENAI_MONTHLY_BUDGET_USD,
-      )
-    : trackedOpenAiProvider;
-  // Report summaries are pure/input-determined - safe to cache by content hash.
-  const reportSummaryProvider = new CachedAIProvider(
-    aiProvider,
-    repositories.aiResponseCache,
-    "report_summary",
-  );
 
   if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) {
     throw new Error(
@@ -97,16 +100,6 @@ async function main(): Promise<void> {
     repositories.projects,
     logger,
   );
-
-  const jiraConfigured = Boolean(
-    env.JIRA_BASE_URL &&
-      env.JIRA_EMAIL &&
-      env.JIRA_API_TOKEN &&
-      env.JIRA_PROJECT_KEY,
-  );
-  const jiraScheduleDescription = jiraConfigured
-    ? "평일(월~금) 오전 9시 (한국 시간)"
-    : undefined;
 
   // Agent registration happens before listener wiring - ReportSaveListener
   // needs a real agentId to satisfy the reports table's NOT NULL FK.
@@ -135,7 +128,9 @@ async function main(): Promise<void> {
     agentThreadId,
   );
   new EventLogListener(dispatcher, repositories.eventLogs, logger, project.id);
-  new GptSummaryListener(dispatcher, reportSummaryProvider, logger);
+  if (reportSummaryProvider) {
+    new GptSummaryListener(dispatcher, reportSummaryProvider, logger);
+  }
   new ReportSaveListener(
     dispatcher,
     repositories.reports,
@@ -173,49 +168,10 @@ async function main(): Promise<void> {
     dispatcher,
     telegramService,
     claudeProvider,
-    aiProvider,
     repositories.projects,
     logger,
     project.id,
-    jiraScheduleDescription,
   );
-
-  if (
-    jiraConfigured &&
-    env.JIRA_BASE_URL &&
-    env.JIRA_EMAIL &&
-    env.JIRA_API_TOKEN &&
-    env.JIRA_PROJECT_KEY
-  ) {
-    const jiraClient = new JiraClient({
-      baseUrl: env.JIRA_BASE_URL,
-      email: env.JIRA_EMAIL,
-      apiToken: env.JIRA_API_TOKEN,
-      projectKey: env.JIRA_PROJECT_KEY,
-    });
-    const jiraDailyReportJob = new JiraDailyReportJob(
-      jiraClient,
-      aiProvider,
-      telegramService,
-      dispatcher,
-      project.name,
-      logger,
-      agentThreadId,
-    );
-    schedule(
-      "0 9 * * 1-5",
-      () => {
-        void jiraDailyReportJob.run();
-      },
-      { timezone: "Asia/Seoul" },
-    );
-    logger.info("Jira daily report scheduled", {
-      cron: "0 9 * * 1-5",
-      timezone: "Asia/Seoul",
-    });
-  } else {
-    logger.info("Jira daily report not configured, skipping scheduler");
-  }
 
   const reportsDir = path.resolve("reports");
   const watcher = new ReportWatcher({ reportsDir }, dispatcher, logger);

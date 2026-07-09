@@ -1,4 +1,4 @@
-import type { ITelegramService } from "./ITelegramService.js";
+import type { ITelegramService, InlineKeyboardButton } from "./ITelegramService.js";
 
 export interface TelegramBotServiceOptions {
   botToken: string;
@@ -13,19 +13,43 @@ export interface TelegramBotServiceOptions {
 export class TelegramBotService implements ITelegramService {
   constructor(private readonly options: TelegramBotServiceOptions) {}
 
-  async sendMessage(text: string, threadId?: string): Promise<void> {
+  async sendMessage(
+    text: string,
+    threadId?: string,
+    buttons?: InlineKeyboardButton[][],
+  ): Promise<void> {
     try {
-      await this.send(text, "Markdown", threadId);
+      await this.send(text, "Markdown", threadId, buttons);
     } catch (error) {
       // Messages built from arbitrary/dynamic content (error text, AI
       // output) can contain unescaped Markdown special characters that
       // Telegram's legacy parser rejects (400 "can't parse entities").
       // Fall back to plain text once rather than losing the notification.
       if (error instanceof Error && error.message.includes("can't parse entities")) {
-        await this.send(text, undefined, threadId);
+        await this.send(text, undefined, threadId, buttons);
         return;
       }
       throw error;
+    }
+  }
+
+  async answerCallbackQuery(callbackQueryId: string, text?: string): Promise<void> {
+    const url = `https://api.telegram.org/bot${this.options.botToken}/answerCallbackQuery`;
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        callback_query_id: callbackQueryId,
+        ...(text ? { text } : {}),
+      }),
+    });
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(
+        `Telegram answerCallbackQuery failed (${response.status}): ${body}`,
+      );
     }
   }
 
@@ -55,6 +79,7 @@ export class TelegramBotService implements ITelegramService {
     text: string,
     parseMode: "Markdown" | undefined,
     threadId?: string,
+    buttons?: InlineKeyboardButton[][],
   ): Promise<void> {
     const url = `https://api.telegram.org/bot${this.options.botToken}/sendMessage`;
 
@@ -66,6 +91,18 @@ export class TelegramBotService implements ITelegramService {
         text,
         ...(parseMode ? { parse_mode: parseMode } : {}),
         ...(threadId ? { message_thread_id: Number(threadId) } : {}),
+        ...(buttons
+          ? {
+              reply_markup: {
+                inline_keyboard: buttons.map((row) =>
+                  row.map((button) => ({
+                    text: button.text,
+                    callback_data: button.callbackData,
+                  })),
+                ),
+              },
+            }
+          : {}),
       }),
     });
 

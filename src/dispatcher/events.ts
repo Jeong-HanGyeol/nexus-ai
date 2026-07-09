@@ -73,6 +73,17 @@ export interface TelegramCommandReceivedEvent {
   };
 }
 
+export interface TelegramCallbackReceivedEvent {
+  type: "TELEGRAM_CALLBACK_RECEIVED";
+  payload: {
+    chatId: string;
+    /** The inline button's callback_data (see ClaudeCommandListener's "nexus:"/"cli:" prefixes). */
+    data: string;
+    callbackQueryId: string;
+    threadId?: string;
+  };
+}
+
 export interface AgentStartedEvent {
   type: "AGENT_STARTED";
   payload: {
@@ -99,6 +110,7 @@ export type SentinelEvent =
   | SentinelErrorEvent
   | TelegramSendEvent
   | TelegramCommandReceivedEvent
+  | TelegramCallbackReceivedEvent
   | AgentStartedEvent
   | AgentStoppedEvent;
 

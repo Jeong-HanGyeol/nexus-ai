@@ -31,7 +31,7 @@ const NEXUS_ENV_PATH = "/Users/hangyeol/Desktop/develop/nexus-ai/.env";
 const APPROVAL_DIR = path.join(os.homedir(), ".claude", "nexus-cli-approvals");
 const DEBUG_LOG_PATH = path.join(APPROVAL_DIR, "debug.log");
 const TIMEOUT_MS = 5 * 60 * 1000;
-const NO_TTY_TELEGRAM_WINDOW_MS = 15 * 1000;
+const NO_TTY_TELEGRAM_WINDOW_MS = TIMEOUT_MS;
 const POLL_INTERVAL_MS = 1000;
 const AFFIRMATIVE_PATTERN = /^(y|yes|예|네|응|어|ㅇㅋ|오케이|승인|진행)/i;
 
@@ -101,12 +101,26 @@ function outputDecision(decision, reason) {
   process.stdout.write(`${JSON.stringify(output)}\n`);
 }
 
-async function sendTelegramMessage(token, chatId, text) {
+function approvalButtons(id) {
+  return [
+    [
+      { text: "✅ 승인", callback_data: `cli:${id}:approve` },
+      { text: "❌ 거부", callback_data: `cli:${id}:deny` },
+    ],
+  ];
+}
+
+async function sendTelegramMessage(token, chatId, text, buttons) {
   try {
     await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, text, parse_mode: "Markdown" }),
+      body: JSON.stringify({
+        chat_id: chatId,
+        text,
+        parse_mode: "Markdown",
+        ...(buttons ? { reply_markup: { inline_keyboard: buttons } } : {}),
+      }),
     });
   } catch {
     // Best-effort - the local tty prompt still works even if this fails.
@@ -229,11 +243,9 @@ async function main() {
 
   if (!hasControllingTty()) {
     // No OS terminal to race against (e.g. this hosted/managed session).
-    // EXPERIMENT: give Telegram a short head start - if it answers within
-    // NO_TTY_TELEGRAM_WINDOW_MS, honor that; otherwise fall back to Claude
-    // Code's own native approval UI (defer via "ask"). This only works if
-    // this harness actually waits out that window rather than bypassing a
-    // slow-to-decide hook - that's exactly what this test measures.
+    // Wait out NO_TTY_TELEGRAM_WINDOW_MS for a Telegram reply; if it answers
+    // in time, honor that, otherwise fall back to Claude Code's own native
+    // approval UI (defer via "ask").
     debugLog(`no controlling tty - racing telegram vs ${NO_TTY_TELEGRAM_WINDOW_MS}ms fallback-to-ask window`);
 
     mkdirSync(APPROVAL_DIR, { recursive: true });
@@ -252,7 +264,8 @@ async function main() {
     await sendTelegramMessage(
       token,
       chatId,
-      `*[CLI 승인 요청 #${id}]*\n${humanSummary}\n\n"예"/"아니오"로 답해주세요 (${NO_TTY_TELEGRAM_WINDOW_MS / 1000}초 내 - 늦으면 CLI 세션에서 직접 승인하게 됩니다)`,
+      `*[CLI 승인 요청 #${id}]*\n${humanSummary}\n\n버튼으로 승인/거부하거나 "예"/"아니오"로 답해주세요 (${NO_TTY_TELEGRAM_WINDOW_MS / 1000}초 내 - 늦으면 CLI 세션에서 직접 승인하게 됩니다)`,
+      approvalButtons(id),
     );
 
     const result = await Promise.race([
@@ -319,7 +332,8 @@ async function main() {
   await sendTelegramMessage(
     token,
     chatId,
-    `*[CLI 승인 요청 #${id}]*\n${humanSummary}\n\n"예"/"아니오"로 답해주세요 (5분 내, 터미널에서도 답변 가능)`,
+    `*[CLI 승인 요청 #${id}]*\n${humanSummary}\n\n버튼으로 승인/거부하거나 "예"/"아니오"로 답해주세요 (5분 내, 터미널에서도 답변 가능)`,
+    approvalButtons(id),
   );
 
   const ttyRace = readTtyAnswer(

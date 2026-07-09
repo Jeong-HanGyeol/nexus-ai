@@ -18,9 +18,16 @@ interface TelegramMessage {
   message_thread_id?: number;
 }
 
+interface TelegramCallbackQuery {
+  id: string;
+  data?: string;
+  message?: { chat: { id: number }; message_thread_id?: number };
+}
+
 interface TelegramUpdate {
   update_id: number;
   message?: TelegramMessage;
+  callback_query?: TelegramCallbackQuery;
 }
 
 interface TelegramGetUpdatesResponse {
@@ -99,6 +106,11 @@ export class TelegramPoller implements ITelegramPoller {
   }
 
   private handleUpdate(update: TelegramUpdate): void {
+    if (update.callback_query) {
+      this.handleCallbackQuery(update.callback_query);
+      return;
+    }
+
     const message = update.message;
     if (!message?.text) {
       return;
@@ -120,6 +132,31 @@ export class TelegramPoller implements ITelegramPoller {
         receivedAt: new Date(message.date * 1000),
         ...(message.message_thread_id !== undefined
           ? { threadId: String(message.message_thread_id) }
+          : {}),
+      },
+    });
+  }
+
+  private handleCallbackQuery(query: TelegramCallbackQuery): void {
+    if (!query.data || !query.message) {
+      return;
+    }
+
+    if (String(query.message.chat.id) !== this.options.chatId) {
+      this.logger.warn("Ignoring callback from unrecognized chat", {
+        chatId: query.message.chat.id,
+      });
+      return;
+    }
+
+    this.eventPublisher.publish({
+      type: "TELEGRAM_CALLBACK_RECEIVED",
+      payload: {
+        chatId: String(query.message.chat.id),
+        data: query.data,
+        callbackQueryId: query.id,
+        ...(query.message.message_thread_id !== undefined
+          ? { threadId: String(query.message.message_thread_id) }
           : {}),
       },
     });
